@@ -1,0 +1,67 @@
+name: Windows ZIP
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          architecture: x64
+          cache: pip
+      - name: Install dependencies
+        run: python -m pip install -r requirements-build.txt
+      - name: Test workflow and GUI
+        run: |
+          python -m unittest test_workflow -v
+          if ($LASTEXITCODE -ne 0) { throw 'Workflow tests failed' }
+          python pro4.py --smoke-test
+          if ($LASTEXITCODE -ne 0) { throw 'GUI smoke test failed' }
+      - name: Build standalone application
+        run: python -m PyInstaller --noconfirm --clean --onedir --windowed --name PhotoEdit --collect-all rawpy --copy-metadata rawpy --copy-metadata numpy --copy-metadata Pillow pro4.py
+      - name: Test packaged application
+        run: |
+          $report = Join-Path $PWD 'smoke-report.txt'
+          $process = Start-Process -FilePath 'dist/PhotoEdit/PhotoEdit.exe' -ArgumentList @('--smoke-test', '--smoke-report', $report) -WindowStyle Hidden -PassThru
+          if (-not $process.WaitForExit(60000)) {
+            $process.Kill()
+            throw 'Packaged application timed out'
+          }
+          if ($process.ExitCode -ne 0 -or -not (Test-Path -LiteralPath $report)) { throw 'Packaged application failed' }
+          if ((Get-Content -LiteralPath $report -Raw) -ne 'OK') { throw 'Invalid smoke report' }
+      - name: Package ZIP
+        run: |
+          Copy-Item README.md dist/PhotoEdit/README.md
+          python -m pip freeze | Out-File dist/PhotoEdit/build-dependencies.txt -Encoding utf8
+          Compress-Archive -Path dist/PhotoEdit -DestinationPath dist/PhotoEdit-Windows-x64.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: PhotoEdit-Windows-x64
+          path: dist/PhotoEdit-Windows-x64.zip
+          if-no-files-found: error
+  release:
+    if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: PhotoEdit-Windows-x64
+          path: release
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || format('v1.0.{0}', github.run_number) }}
+          RELEASE_SHA: ${{ github.sha }}
+        run: gh release create "$RELEASE_TAG" release/PhotoEdit-Windows-x64.zip --target "$RELEASE_SHA" --title "PhotoEdit $RELEASE_TAG" --notes "Windows x64版。ZIPをすべて展開してPhotoEdit.exeを起動してください。Pythonのインストールは不要です。実写RAWでの動作は未確認です。"
